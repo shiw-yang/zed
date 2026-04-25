@@ -142,6 +142,8 @@ pub(crate) struct HtmlHighlightStyle {
     pub weight: FontWeight,
     pub link: bool,
     pub oblique: bool,
+    pub superscript: bool,
+    pub subscript: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -395,51 +397,74 @@ fn parse_paragraph(
             }
         }
         NodeData::Element { name, attrs, .. } => {
-            if name.local == local_name!("img") {
-                if let Some(image) = extract_image(source_range, attrs) {
-                    paragraph.push(HtmlParagraphChunk::Image(image));
+            match name.local {
+                local_name!("img") => {
+                    if let Some(image) = extract_image(source_range, attrs) {
+                        paragraph.push(HtmlParagraphChunk::Image(image));
+                    }
                 }
-            } else if name.local == local_name!("b") || name.local == local_name!("strong") {
-                highlights.push(HtmlHighlightStyle {
-                    weight: FontWeight::BOLD,
-                    ..Default::default()
-                });
-                consume_paragraph(source_range, node, paragraph, highlights, links);
-            } else if name.local == local_name!("i") {
-                highlights.push(HtmlHighlightStyle {
-                    italic: true,
-                    ..Default::default()
-                });
-                consume_paragraph(source_range, node, paragraph, highlights, links);
-            } else if name.local == local_name!("em") {
-                highlights.push(HtmlHighlightStyle {
-                    oblique: true,
-                    ..Default::default()
-                });
-                consume_paragraph(source_range, node, paragraph, highlights, links);
-            } else if name.local == local_name!("del") {
-                highlights.push(HtmlHighlightStyle {
-                    strikethrough: true,
-                    ..Default::default()
-                });
-                consume_paragraph(source_range, node, paragraph, highlights, links);
-            } else if name.local == local_name!("ins") {
-                highlights.push(HtmlHighlightStyle {
-                    underline: true,
-                    ..Default::default()
-                });
-                consume_paragraph(source_range, node, paragraph, highlights, links);
-            } else if name.local == local_name!("a") {
-                if let Some(url) = attr_value(attrs, local_name!("href")) {
+                local_name!("b") | local_name!("strong") => {
                     highlights.push(HtmlHighlightStyle {
-                        link: true,
+                        weight: FontWeight::BOLD,
                         ..Default::default()
                     });
-                    links.push(url.into());
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
                 }
-                consume_paragraph(source_range, node, paragraph, highlights, links);
-            } else {
-                consume_paragraph(source_range, node, paragraph, highlights, links);
+                local_name!("i") => {
+                    highlights.push(HtmlHighlightStyle {
+                        italic: true,
+                        ..Default::default()
+                    });
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
+                local_name!("em") => {
+                    highlights.push(HtmlHighlightStyle {
+                        oblique: true,
+                        ..Default::default()
+                    });
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
+                local_name!("del") => {
+                    highlights.push(HtmlHighlightStyle {
+                        strikethrough: true,
+                        ..Default::default()
+                    });
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
+                local_name!("ins") => {
+                    highlights.push(HtmlHighlightStyle {
+                        underline: true,
+                        ..Default::default()
+                    });
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
+                local_name!("sup") => {
+                    highlights.push(HtmlHighlightStyle {
+                        superscript: true,
+                        ..Default::default()
+                    });
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
+                local_name!("sub") => {
+                    highlights.push(HtmlHighlightStyle {
+                        subscript: true,
+                        ..Default::default()
+                    });
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
+                local_name!("a") => {
+                    if let Some(url) = attr_value(attrs, local_name!("href")) {
+                        highlights.push(HtmlHighlightStyle {
+                            link: true,
+                            ..Default::default()
+                        });
+                        links.push(url.into());
+                    }
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
+                _ => {
+                    consume_paragraph(source_range, node, paragraph, highlights, links);
+                }
             }
         }
         _ => {}
@@ -966,5 +991,43 @@ mod tests {
             panic!("expected paragraph");
         };
         assert_eq!(paragraph.text_align, Some(TextAlign::Center));
+    }
+
+    #[test]
+    fn parses_html_sup_sub_text() {
+        let parsed = parse_html_block(
+            "<p>Hello <sup>world</sup> and <sub>earth</sub></p>",
+            0..50,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.children.len(), 1);
+        let ParsedHtmlElement::Paragraph(paragraph) = &parsed.children[0] else {
+            panic!("expected paragraph");
+        };
+        let HtmlParagraphChunk::Text(text) = &paragraph.contents[0] else {
+            panic!("expected text chunk");
+        };
+
+        assert_eq!(text.contents.as_ref(), "Hello world and earth");
+        assert_eq!(
+            text.highlights,
+            vec![
+                (
+                    6..11,
+                    HtmlHighlightStyle {
+                        superscript: true,
+                        ..Default::default()
+                    }
+                ),
+                (
+                    16..21,
+                    HtmlHighlightStyle {
+                        subscript: true,
+                        ..Default::default()
+                    }
+                )
+            ]
+        );
     }
 }

@@ -1300,4 +1300,17 @@ mod tests {
         assert!(parsed.heading_slugs.contains_key("foo-1"));
         assert!(parsed.heading_slugs.contains_key("foo-1-1"));
     }
+
+    #[test]
+    fn test_superscript_and_subscript() {
+        let parsed = parse_markdown_with_options("^sup^ and ~sub~", false, false);
+        assert!(parsed.events.iter().any(|(_, event)| matches!(
+            event,
+            Start(Superscript) | End(MarkdownTagEnd::Superscript)
+        )));
+        assert!(parsed.events.iter().any(|(_, event)| matches!(
+            event,
+            Start(Subscript) | End(MarkdownTagEnd::Subscript)
+        )));
+    }
 }

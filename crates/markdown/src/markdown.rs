@@ -33,7 +33,7 @@ use std::time::Duration;
 use collections::{HashMap, HashSet};
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Edges, Entity,
-    FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla, Image,
+    FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla, Image,
     ImageFormat, ImageSource, KeyContext, Length, MouseButton, MouseDownEvent, MouseEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollHandle, Stateful, StrikethroughStyle,
     StyleRefinement, StyledText, Task, TextAlign, TextLayout, TextRun, TextStyle,
@@ -1858,6 +1858,14 @@ impl Element for MarkdownElement {
                                 ..Default::default()
                             })
                         }
+                        MarkdownTag::Superscript => builder.push_text_style(TextStyleRefinement {
+                            font_features: Some(FontFeatures::superscript()),
+                            ..Default::default()
+                        }),
+                        MarkdownTag::Subscript => builder.push_text_style(TextStyleRefinement {
+                            font_features: Some(FontFeatures::subscript()),
+                            ..Default::default()
+                        }),
                         MarkdownTag::Link { dest_url, .. } => {
                             if builder.code_block_stack.is_empty() {
                                 builder.push_link(dest_url.clone(), range.clone());
@@ -2034,6 +2042,8 @@ impl Element for MarkdownElement {
                     MarkdownTagEnd::Emphasis => builder.pop_text_style(),
                     MarkdownTagEnd::Strong => builder.pop_text_style(),
                     MarkdownTagEnd::Strikethrough => builder.pop_text_style(),
+                    MarkdownTagEnd::Superscript => builder.pop_text_style(),
+                    MarkdownTagEnd::Subscript => builder.pop_text_style(),
                     MarkdownTagEnd::Link => {
                         if builder.code_block_stack.is_empty() {
                             builder.pop_text_style()

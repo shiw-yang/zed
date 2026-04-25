@@ -1,6 +1,9 @@
 use std::ops::Range;
 
-use gpui::{App, FontStyle, FontWeight, StrikethroughStyle, TextStyleRefinement, UnderlineStyle};
+use gpui::{
+    App, FontFeatures, FontStyle, FontWeight, StrikethroughStyle, TextStyleRefinement,
+    UnderlineStyle,
+};
 use pulldown_cmark::Alignment;
 use ui::prelude::*;
 
@@ -459,6 +462,12 @@ fn apply_html_highlight_style(refinement: &mut TextStyleRefinement, style: &Html
             color: None,
         });
     }
+
+    if style.superscript {
+        refinement.font_features = Some(FontFeatures::superscript());
+    } else if style.subscript {
+        refinement.font_features = Some(FontFeatures::subscript());
+    }
 }
 
 fn html_list_item_prefix(order: usize, ordered: bool, depth: usize) -> String {
@@ -622,5 +631,56 @@ mod tests {
         assert_eq!(rendered_lines[0], "Hello");
         assert_eq!(rendered_lines[1], "world");
         assert!(rendered_lines.iter().any(|line| line.contains("item")));
+    }
+
+    #[gpui::test]
+    fn test_html_sup_sub_rendering(cx: &mut TestAppContext) {
+        struct TestWindow;
+
+        impl Render for TestWindow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        ensure_theme_initialized(cx);
+
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| {
+            Markdown::new_with_options(
+                "<p>Hello <sup>world</sup> and <sub>earth</sub></p>".into(),
+                None,
+                None,
+                MarkdownOptions {
+                    parse_html: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let (rendered, _) = cx.draw(
+            Default::default(),
+            size(px(600.0), px(600.0)),
+            |_window, _cx| {
+                MarkdownElement::new(markdown, MarkdownStyle::default()).code_block_renderer(
+                    CodeBlockRenderer::Default {
+                        copy_button_visibility: CopyButtonVisibility::Hidden,
+                        border: false,
+                    },
+                )
+            },
+        );
+
+        let rendered_text = rendered
+            .text
+            .lines
+            .iter()
+            .map(|line| line.layout.wrapped_text())
+            .collect::<Vec<_>>()
+            .concat()
+            .replace('\n', "");
+
+        assert_eq!(rendered_text, "Hello world and earth");
     }
 }

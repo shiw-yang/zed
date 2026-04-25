@@ -13,6 +13,16 @@ impl FontFeatures {
         Self(Arc::new(vec![("calt".into(), 0)]))
     }
 
+    /// Enables `sups`.
+    pub fn superscript() -> Self {
+        Self(Arc::new(vec![("sups".into(), 1)]))
+    }
+
+    /// Enables `subs`.
+    pub fn subscript() -> Self {
+        Self(Arc::new(vec![("subs".into(), 1)]))
+    }
+
     /// Get the tag name list of the font OpenType features
     /// only enabled or disabled features are returned
     pub fn tag_value_list(&self) -> &[(String, u32)] {
