@@ -480,8 +480,22 @@ impl AgentMessage {
         for content in &self.content {
             match content {
                 AgentMessageContent::Text(text) => {
-                    markdown.push_str(text);
-                    markdown.push('\n');
+                    let mut parser = ThinkTagParser::default();
+                    let segments = parser.process_chunk(text);
+                    let flushed = parser.flush();
+                    for segment in segments.into_iter().chain(flushed) {
+                        match segment {
+                            ThinkTagSegment::Text(t) => {
+                                markdown.push_str(&t);
+                                markdown.push('\n');
+                            }
+                            ThinkTagSegment::Thinking(t) => {
+                                markdown.push_str("<think>");
+                                markdown.push_str(&t);
+                                markdown.push_str("</think>\n");
+                            }
+                        }
+                    }
                 }
                 AgentMessageContent::Thinking { text, .. } => {
                     markdown.push_str("<think>");
@@ -982,6 +996,7 @@ pub struct Thread {
     ui_scroll_position: Option<gpui::ListOffset>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
+    think_parser: ThinkTagParser,
 }
 
 impl Thread {
@@ -1103,6 +1118,7 @@ impl Thread {
             draft_prompt: None,
             ui_scroll_position: None,
             running_subagents: Vec::new(),
+            think_parser: ThinkTagParser::default(),
         }
     }
 
@@ -1140,7 +1156,17 @@ impl Thread {
                 Message::Agent(assistant_message) => {
                     for content in &assistant_message.content {
                         match content {
-                            AgentMessageContent::Text(text) => stream.send_text(text),
+                            AgentMessageContent::Text(text) => {
+                                let mut parser = ThinkTagParser::default();
+                                let segments = parser.process_chunk(text);
+                                let flushed = parser.flush();
+                                for segment in segments.into_iter().chain(flushed) {
+                                    match segment {
+                                        ThinkTagSegment::Text(t) => stream.send_text(&t),
+                                        ThinkTagSegment::Thinking(t) => stream.send_thinking(&t),
+                                    }
+                                }
+                            }
                             AgentMessageContent::Thinking { text, .. } => {
                                 stream.send_thinking(text)
                             }
@@ -1336,6 +1362,7 @@ impl Thread {
                 offset_in_item: gpui::px(sp.offset_in_item),
             }),
             running_subagents: Vec::new(),
+            think_parser: ThinkTagParser::default(),
         }
     }
 
@@ -2261,7 +2288,14 @@ impl Thread {
             }
             Stop(StopReason::Refusal) => return Err(CompletionError::Refusal.into()),
             Stop(StopReason::MaxTokens) => return Err(CompletionError::MaxTokens.into()),
-            Stop(StopReason::ToolUse | StopReason::EndTurn) => {}
+            Stop(StopReason::ToolUse | StopReason::EndTurn) => {
+                for segment in self.think_parser.flush() {
+                    match segment {
+                        ThinkTagSegment::Text(t) => event_stream.send_text(&t),
+                        ThinkTagSegment::Thinking(t) => event_stream.send_thinking(&t),
+                    }
+                }
+            }
             Started | Queued { .. } => {}
         }
 
@@ -2269,15 +2303,22 @@ impl Thread {
     }
 
     fn handle_text_event(&mut self, new_text: String, event_stream: &ThreadEventStream) {
-        event_stream.send_text(&new_text);
-
+        // Store raw text with <think> tags preserved for context
         let last_message = self.pending_message();
         if let Some(AgentMessageContent::Text(text)) = last_message.content.last_mut() {
             text.push_str(&new_text);
         } else {
             last_message
                 .content
-                .push(AgentMessageContent::Text(new_text));
+                .push(AgentMessageContent::Text(new_text.clone()));
+        }
+
+        // Parse <think> tags for streaming rendering
+        for segment in self.think_parser.process_chunk(&new_text) {
+            match segment {
+                ThinkTagSegment::Text(t) => event_stream.send_text(&t),
+                ThinkTagSegment::Thinking(t) => event_stream.send_thinking(&t),
+            }
         }
     }
 
@@ -4271,6 +4312,130 @@ fn convert_image(image_content: acp::ImageContent) -> LanguageModelImage {
     }
 }
 
+/// Parses `<think>...</think>` tags from streaming text chunks.
+/// Handles tags split across chunk boundaries via an internal buffer.
+#[derive(Default)]
+struct ThinkTagParser {
+    state: ThinkTagState,
+    buffer: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ThinkTagState {
+    Outside,
+    Inside,
+}
+
+impl Default for ThinkTagState {
+    fn default() -> Self {
+        Self::Outside
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ThinkTagSegment {
+    Text(String),
+    Thinking(String),
+}
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+impl ThinkTagParser {
+    fn process_chunk(&mut self, chunk: &str) -> Vec<ThinkTagSegment> {
+        self.buffer.push_str(chunk);
+        let mut segments = Vec::new();
+
+        loop {
+            match self.state {
+                ThinkTagState::Outside => {
+                    if let Some(pos) = self.buffer.find(THINK_OPEN) {
+                        if pos > 0 {
+                            segments.push(ThinkTagSegment::Text(
+                                self.buffer[..pos].to_string(),
+                            ));
+                        }
+                        self.buffer = self.buffer[pos + THINK_OPEN.len()..].to_string();
+                        self.state = ThinkTagState::Inside;
+                    } else if let Some(prefix_len) = suffix_prefix_match(&self.buffer, THINK_OPEN)
+                    {
+                        if prefix_len < self.buffer.len() {
+                            let split = self.buffer.len() - prefix_len;
+                            segments.push(ThinkTagSegment::Text(
+                                self.buffer[..split].to_string(),
+                            ));
+                            self.buffer = self.buffer[split..].to_string();
+                        }
+                        break;
+                    } else {
+                        if !self.buffer.is_empty() {
+                            segments.push(ThinkTagSegment::Text(
+                                std::mem::take(&mut self.buffer),
+                            ));
+                        }
+                        break;
+                    }
+                }
+                ThinkTagState::Inside => {
+                    if let Some(pos) = self.buffer.find(THINK_CLOSE) {
+                        if pos > 0 {
+                            segments.push(ThinkTagSegment::Thinking(
+                                self.buffer[..pos].to_string(),
+                            ));
+                        }
+                        self.buffer = self.buffer[pos + THINK_CLOSE.len()..].to_string();
+                        self.state = ThinkTagState::Outside;
+                    } else if let Some(prefix_len) = suffix_prefix_match(&self.buffer, THINK_CLOSE)
+                    {
+                        if prefix_len < self.buffer.len() {
+                            let split = self.buffer.len() - prefix_len;
+                            segments.push(ThinkTagSegment::Thinking(
+                                self.buffer[..split].to_string(),
+                            ));
+                            self.buffer = self.buffer[split..].to_string();
+                        }
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        segments
+    }
+
+    fn flush(&mut self) -> Vec<ThinkTagSegment> {
+        if self.buffer.is_empty() {
+            return vec![];
+        }
+        let content = std::mem::take(&mut self.buffer);
+        match self.state {
+            ThinkTagState::Inside => vec![ThinkTagSegment::Thinking(content)],
+            ThinkTagState::Outside => vec![ThinkTagSegment::Text(content)],
+        }
+    }
+}
+
+/// Returns Some(len) if the suffix of `text` is a prefix of `pattern`.
+/// The len is the number of bytes at the end of `text` that match a prefix of `pattern`.
+fn suffix_prefix_match(text: &str, pattern: &str) -> Option<usize> {
+    if text.is_empty() {
+        return None;
+    }
+    let max_len = pattern.len().min(text.len());
+    for len in (1..=max_len).rev() {
+        let start = text.len() - len;
+        if !text.is_char_boundary(start) {
+            continue;
+        }
+        if pattern.starts_with(&text[start..]) {
+            return Some(len);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4592,5 +4757,105 @@ mod tests {
             );
             assert!(last_message.tool_results.contains_key(&tool_use_id));
         })
+    }
+
+    mod think_tag_parser_tests {
+        use super::*;
+
+        #[test]
+        fn test_no_think_tags() {
+            let mut parser = ThinkTagParser::default();
+            let segments = parser.process_chunk("hello world");
+            let flushed = parser.flush();
+            assert_eq!(segments, vec![ThinkTagSegment::Text("hello world".into())]);
+            assert!(flushed.is_empty());
+        }
+
+        #[test]
+        fn test_complete_think_block() {
+            let mut parser = ThinkTagParser::default();
+            let segments = parser.process_chunk("<think>thinking</think>after");
+            let flushed = parser.flush();
+            assert_eq!(
+                segments,
+                vec![
+                    ThinkTagSegment::Thinking("thinking".into()),
+                    ThinkTagSegment::Text("after".into()),
+                ]
+            );
+            assert!(flushed.is_empty());
+        }
+
+        #[test]
+        fn test_open_tag_split_across_chunks() {
+            let mut parser = ThinkTagParser::default();
+            let segments1 = parser.process_chunk("<thi");
+            assert!(segments1.is_empty());
+            let segments2 = parser.process_chunk("nk>content</think>tail");
+            let flushed = parser.flush();
+            assert_eq!(
+                segments2,
+                vec![
+                    ThinkTagSegment::Thinking("content".into()),
+                    ThinkTagSegment::Text("tail".into()),
+                ]
+            );
+            assert!(flushed.is_empty());
+        }
+
+        #[test]
+        fn test_close_tag_split_across_chunks() {
+            let mut parser = ThinkTagParser::default();
+            let segments1 = parser.process_chunk("<think>content</thi");
+            assert_eq!(segments1, vec![ThinkTagSegment::Thinking("content".into())]);
+            let segments2 = parser.process_chunk("nk>after");
+            let flushed = parser.flush();
+            assert_eq!(segments2, vec![ThinkTagSegment::Text("after".into())]);
+            assert!(flushed.is_empty());
+        }
+
+        #[test]
+        fn test_unclosed_think_flushed_as_thinking() {
+            let mut parser = ThinkTagParser::default();
+            let segments = parser.process_chunk("<think>unclosed content");
+            assert!(segments.is_empty());
+            let flushed = parser.flush();
+            assert_eq!(
+                flushed,
+                vec![ThinkTagSegment::Thinking("unclosed content".into())]
+            );
+        }
+
+        #[test]
+        fn test_multiple_think_blocks() {
+            let mut parser = ThinkTagParser::default();
+            let segments = parser.process_chunk("<think>A</think>middle<think>B</think>end");
+            let flushed = parser.flush();
+            assert_eq!(
+                segments,
+                vec![
+                    ThinkTagSegment::Thinking("A".into()),
+                    ThinkTagSegment::Text("middle".into()),
+                    ThinkTagSegment::Thinking("B".into()),
+                    ThinkTagSegment::Text("end".into()),
+                ]
+            );
+            assert!(flushed.is_empty());
+        }
+
+        #[test]
+        fn test_empty_think_block() {
+            let mut parser = ThinkTagParser::default();
+            let segments = parser.process_chunk("before<think></think>after");
+            let flushed = parser.flush();
+            assert_eq!(
+                segments,
+                vec![
+                    ThinkTagSegment::Text("before".into()),
+                    ThinkTagSegment::Text("after".into()),
+                ]
+            );
+            assert!(flushed.is_empty());
+        }
     }
 }
